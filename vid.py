@@ -35,7 +35,7 @@ class AsciiArtConverter:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             h, w = gray.shape
-            new_h = int(h * self.width / w * self.aspect)
+            new_h = int(h * self.width / w * self.aspect) # not magic number its ratio for monospace fonts
             
             if new_h > 500:
                 new_h = 500
@@ -73,9 +73,9 @@ class VideoLoader:
             raise ValueError(f"Can't open video: {path}")
         
 
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0 or self.fps > 120:
-            self.fps = 24.0
+        self.fps = cap.get(cv2.CAP_PROP_FPS) # probably need to use this  https://docs.opencv.org/4.x/dd/d43/classcv_1_1VideoCapture.html
+        if self.fps <= 0 or self.fps > 120: #make so default fps if video has invalid value
+            self.fps = 24.0 #maybe warn usr?
             
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if self.total_frames <= 0:
@@ -122,7 +122,7 @@ class VideoLoader:
             
         return None
     
-    def seek(self, pos_01):
+    def seek(self, pos_01): # dont work properly with CV_PROP_POS_AVI_RATIO 
         if not self.cap:
             return False
             
@@ -205,9 +205,9 @@ class ASCIIVideoGUI:
         self.settings = Settings()
         
         self.playing = False
-        self.current_frame = None
+        self.current_frame = Nonedelay = int(1000 / max(self.video.fps, 1.0)) # i think i did that number because i converted fps to miliseconds
         self.worker_run = True
-        self.frame_queue = queue.Queue(maxsize=3)
+        self.frame_queue = queue.Queue(maxsize=3) #balance between smooth playback and memory usage
         self.seeking = False
         
         self._setup_ui()
@@ -692,7 +692,7 @@ F1              - This help"""
     
     def show_about(self):
         about = """ASCII Video Player
-made by 74fm"""
+made by 74fm""" #need to add soemthing more here its bare
         messagebox.showinfo("About", about) 
     
     def _quit(self):
