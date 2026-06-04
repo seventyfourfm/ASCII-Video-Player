@@ -443,7 +443,7 @@ class ASCIIVideoGUI:
         self.play_btn.config(text="Play")
         self.status.config(text="Stopped")
         
-        while not self.frame_queue.empty():
+        while not self.frame_queue.empty(): # inaficient breaks sometimes
             try:
                 self.frame_queue.get_nowait()
             except:
@@ -507,7 +507,7 @@ class ASCIIVideoGUI:
                 self._schedule_display()
     
     def _do_seek(self): # we have this seaking mechanism but also we have _step
-        if not self.video.cap: # need to do something abt this issue
+        if not self.video.cap: # need to do something abt this issue (maybe merge?)
             self.seeking = False
             return
             
