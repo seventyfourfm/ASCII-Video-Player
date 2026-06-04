@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 import cv2
 import numpy as np
 import tkinter as tk
@@ -9,834 +9,710 @@ import time
 import json
 import os
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict, Any
-from enum import Enum
-import logging
-from datetime import timedelta
 
-# Configure logging
+
+import logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(message)s",
+    handlers=[logging.FileHandler("log.log"), logging.StreamHandler()]
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-class PlaybackState(Enum):
-    """Playback states for the video player"""
-    STOPPED = "stopped"
-    PLAYING = "playing"
-    PAUSED = "paused"
-
-
-@dataclass
-class VideoMetadata:
-    """Container for video metadata"""
-    fps: float
-    total_frames: int
-    duration: float
-    width: int
-    height: int
-    codec: str
-
-
-class ASCIIConverter:
-    """Handles all ASCII art conversion logic"""
+class AsciiArtConverter:
+    CHARS = " .:-=+*#%@"
     
-    DEFAULT_CHARS = " .:-=+*#%@"
-    MIN_WIDTH = 10
-    MAX_WIDTH = 300
-    MIN_FONT_SIZE = 6
-    MAX_FONT_SIZE = 30
-    DEFAULT_ASPECT_RATIO = 0.55
-    
-    def __init__(self, width: int = 100, chars: str = None, aspect_ratio: float = None):
-        """
-        Initialize ASCII converter
+    def __init__(self, width=100):
+        self.width = max(10, min(300, width))
+        self.chars = self.CHARS
+        self.aspect = 0.55  # seems ok
         
-        Args:
-            width: ASCII art width in characters
-            chars: Character set for brightness mapping
-            aspect_ratio: Character aspect ratio (height/width)
-        """
-        self.width = max(self.MIN_WIDTH, min(width, self.MAX_WIDTH))
-        self.chars = chars or self.DEFAULT_CHARS
-        self.aspect_ratio = aspect_ratio or self.DEFAULT_ASPECT_RATIO
-        
-        # Pre-calculate character mapping for speed
-        self._char_array = np.array(list(self.chars))
-        
-    def set_width(self, width: int) -> None:
-        """Set ASCII width with validation"""
-        self.width = max(self.MIN_WIDTH, min(width, self.MAX_WIDTH))
-    
-    def frame_to_ascii(self, frame: np.ndarray) -> str:
-        """
-        Convert video frame to ASCII art
-        
-        Args:
-            frame: BGR image frame from OpenCV
-            
-        Returns:
-            ASCII art string
-        """
-        if frame is None or frame.size == 0:
+    def convert(self, frame):
+        if frame is None:
             return ""
         
         try:
-            # Convert to grayscale
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+            new_h = int(h * self.width / w * self.aspect)
             
-            # Calculate height maintaining aspect ratio
-            height = max(1, int(gray.shape[0] * self.width / gray.shape[1] * self.aspect_ratio))
-            height = max(1, min(height, 1000))  # Cap height for performance
+            if new_h > 500:
+                new_h = 500
+                
+            resized = cv2.resize(gray, (self.width, new_h), interpolation=cv2.INTER_LINEAR)
             
-            # Resize image
-            resized = cv2.resize(gray, (self.width, height), interpolation=cv2.INTER_LINEAR)
+
+            chars = np.array(list(self.chars))
+            indices = (resized / 255.0 * (len(chars) - 1)).astype(np.int32)
             
-            # Vectorized pixel-to-character mapping
-            indices = (resized / 255 * (len(self.chars) - 1)).astype(np.uint8)
-            
-            # Convert to ASCII using vectorized lookup
-            ascii_rows = [''.join(self._char_array[row]) for row in indices]
-            
-            return '\n'.join(ascii_rows)
+
+            return "\n".join("".join(chars[row]) for row in indices)
             
         except Exception as e:
-            logger.error(f"Error converting frame to ASCII: {e}")
+            log.error(f"Conversion failed: {e}")
             return ""
 
 
-class VideoPlayer:
-    """Handles video loading, playback, and frame management"""
-    
-    MAX_FPS_CAP = 30  # Cap rendering at 30 FPS maximum
-    FRAME_SKIP_THRESHOLD = 60  # Skip frames when FPS > this value
+class VideoLoader:
+
     
     def __init__(self):
-        """Initialize video player"""
-        self.cap: Optional[cv2.VideoCapture] = None
-        self.video_path: Optional[str] = None
-        self.metadata: Optional[VideoMetadata] = None
-        self._lock = threading.Lock()
+        self.cap = None
+        self.fps = 24.0
+        self.total_frames = 0
+        self.width = 0
+        self.height = 0
+        self.path = None
         
-    def load_video(self, path: str) -> bool:
-        """
-        Load video file
+    def load(self, path):
+        self.close()
         
-        Args:
-            path: Path to video file
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            raise ValueError(f"Can't open video: {path}")
+        
+
+        self.fps = cap.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0 or self.fps > 120:
+            self.fps = 24.0
             
-        Returns:
-            True if loaded successfully, False otherwise
-        """
+        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if self.total_frames <= 0:
+            self.total_frames = 1
+            
+        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        ret, test = cap.read()
+        if not ret or test is None:
+            cap.release()
+            raise ValueError("Can't read frames from this video")
+            
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.cap = cap
+        self.path = str(path)
+        
+        return {
+            'fps': self.fps,
+            'frames': self.total_frames,
+            'duration': self.total_frames / self.fps,
+            'size': f"{self.width}x{self.height}"
+        }
+    
+    def get_frame(self, frame_num=None):
+        if not self.cap:
+            return None
+            
         try:
-            # Release existing video
-            self.release()
-            
-            # Validate file exists
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"Video file not found: {path}")
-            
-            # Open video
-            cap = cv2.VideoCapture(path)
-            if not cap.isOpened():
-                raise ValueError(f"Could not open video: {path}")
-            
-            # Extract metadata
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0:
-                fps = 24.0  # Default fallback
-            
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = total_frames / fps if fps > 0 else 0
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            # Get codec info
-            fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-            codec = ''.join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)]) if fourcc else "Unknown"
-            
-            with self._lock:
-                self.cap = cap
-                self.video_path = path
-                self.metadata = VideoMetadata(
-                    fps=fps,
-                    total_frames=total_frames,
-                    duration=duration,
-                    width=width,
-                    height=height,
-                    codec=codec
-                )
-            
-            logger.info(f"Loaded video: {path} - {width}x{height}, {fps:.2f}fps, {total_frames} frames")
-            return True
-            
+            if frame_num is not None:
+                frame_num = max(0, min(frame_num, self.total_frames - 1))
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                return {
+                    'frame': frame,
+                    'num': pos,
+                    'time': pos / self.fps if self.fps > 0 else 0
+                }
         except Exception as e:
-            logger.error(f"Failed to load video: {e}")
-            self.release()
-            raise
-    
-    def get_frame(self, frame_num: Optional[int] = None) -> Optional[np.ndarray]:
-        """
-        Get a specific frame from the video
-        
-        Args:
-            frame_num: Frame number to retrieve (None for next frame)
+            log.error(f"Frame read error: {e}")
             
-        Returns:
-            Frame as numpy array or None if failed
-        """
-        with self._lock:
-            if self.cap is None or not self.cap.isOpened():
-                return None
-            
-            try:
-                if frame_num is not None:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                
-                ret, frame = self.cap.read()
-                if not ret:
-                    # Loop back to beginning
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = self.cap.read()
-                    
-                return frame if ret else None
-                
-            except Exception as e:
-                logger.error(f"Error getting frame: {e}")
-                return None
+        return None
     
-    def get_current_frame_num(self) -> int:
-        """Get current frame number"""
-        with self._lock:
-            if self.cap and self.cap.isOpened():
-                return int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            return 0
-    
-    def set_frame_position(self, position: float) -> bool:
-        """
-        Set playback position (0.0 to 1.0)
-        
-        Args:
-            position: Relative position (0.0 to 1.0)
-            
-        Returns:
-            True if successful
-        """
-        if not self.metadata:
+    def seek(self, pos_01):
+        if not self.cap:
             return False
             
-        frame_num = int(position * self.metadata.total_frames)
-        with self._lock:
-            if self.cap and self.cap.isOpened():
-                return self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-        return False
+        try:
+            pos_01 = max(0.0, min(1.0, pos_01))
+            self.cap.set(cv2.CAP_PROP_POS_AVI_RATIO, pos_01)
+            return True
+        except:
+            return False
     
-    def release(self) -> None:
-        """Release video capture resources"""
-        with self._lock:
-            if self.cap:
-                self.cap.release()
-                self.cap = None
-            self.video_path = None
-            self.metadata = None
-    
-    def is_loaded(self) -> bool:
-        """Check if video is loaded"""
-        return self.cap is not None and self.cap.isOpened()
+    def close(self):
+        if self.cap:
+            self.cap.release()
+            self.cap = None
 
 
-class SettingsManager:
-    """Manages application settings persistence"""
-    
-    SETTINGS_FILE = "ascii_video_settings.json"
-    
-    DEFAULT_SETTINGS = {
-        "ascii_width": 100,
-        "font_size": 10,
-        "charset": " .:-=+*#%@",
-        "aspect_ratio": 0.55,
-        "theme": "dark",
-        "recent_files": []
-    }
+class Settings:
     
     def __init__(self):
-        """Initialize settings manager"""
-        self.settings = self.DEFAULT_SETTINGS.copy()
+        self.file = Path.home() / ".config.json" #config is simple
+        self.data = {
+            'width': 100,
+            'font_size': 10,
+            'charset': " .:-=+*#%@",
+            'aspect': 0.55,
+            'theme': 'dark',
+            'loop': False,
+            'recent': []
+        }
         self.load()
     
-    def load(self) -> None:
-        """Load settings from file"""
+    def load(self):
+        if self.file.exists():
+            try:
+                with open(self.file, 'r') as f:
+                    saved = json.load(f)
+                    self.data.update(saved)
+                    self.data['recent'] = [p for p in self.data.get('recent', []) if Path(p).exists()]
+            except:
+                pass
+    
+    def save(self):
         try:
-            if os.path.exists(self.SETTINGS_FILE):
-                with open(self.SETTINGS_FILE, 'r') as f:
-                    loaded = json.load(f)
-                    self.settings.update(loaded)
-                    logger.info(f"Loaded settings from {self.SETTINGS_FILE}")
-        except Exception as e:
-            logger.warning(f"Could not load settings: {e}")
+            with open(self.file, 'w') as f:
+                json.dump(self.data, f, indent=2)
+        except:
+            pass
     
-    def save(self) -> None:
-        """Save settings to file"""
-        try:
-            with open(self.SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
-                logger.info(f"Saved settings to {self.SETTINGS_FILE}")
-        except Exception as e:
-            logger.error(f"Could not save settings: {e}")
-    
-    def get(self, key: str, default=None):
-        """Get setting value"""
-        return self.settings.get(key, default)
-    
-    def set(self, key: str, value: Any) -> None:
-        """Set setting value"""
-        self.settings[key] = value
+    def add_recent(self, path):
+        recent = self.data.get('recent', [])
+        if path in recent:
+            recent.remove(path)
+        recent.insert(0, path)
+        self.data['recent'] = recent[:10]
         self.save()
     
-    def add_recent_file(self, filepath: str) -> None:
-        """Add file to recent files list"""
-        recent = self.settings.get("recent_files", [])
-        if filepath in recent:
-            recent.remove(filepath)
-        recent.insert(0, filepath)
-        self.settings["recent_files"] = recent[:10]  # Keep last 10
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+    
+    def set(self, key, value):
+        self.data[key] = value
         self.save()
 
 
 class ASCIIVideoGUI:
-    """Main GUI application for ASCII Video Player"""
     
-    # Theme colors
     THEMES = {
-        "dark": {
-            "bg": "#1e1e1e",
-            "fg": "#ffffff",
-            "accent": "#007acc",
-            "button_bg": "#2d2d2d",
-            "canvas_bg": "#000000",
-            "status_bg": "#007acc"
-        },
-        "matrix": {
-            "bg": "#000000",
-            "fg": "#00ff00",
-            "accent": "#008800",
-            "button_bg": "#003300",
-            "canvas_bg": "#000000",
-            "status_bg": "#008800"
-        },
-        "amber": {
-            "bg": "#000000",
-            "fg": "#ffb000",
-            "accent": "#cc8800",
-            "button_bg": "#332200",
-            "canvas_bg": "#000000",
-            "status_bg": "#cc8800"
-        }
+        'dark':   {'bg': '#1e1e1e', 'fg': '#ffffff', 'accent': '#007acc', 'btn': '#2d2d2d'},
+        'matrix': {'bg': '#000000', 'fg': '#00ff00', 'accent': '#008800', 'btn': '#003300'},
+        'amber':  {'bg': '#000000', 'fg': '#ffb000', 'accent': '#cc8800', 'btn': '#332200'},
     }
     
-    def __init__(self, root: tk.Tk):
-        """Initialize the ASCII Video Player GUI"""
+    def __init__(self, root):
         self.root = root
-        self.root.title("ASCII Video Player")
-        self.root.geometry("1200x800")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        root.title("ASCII Video Player")
+        root.geometry("1200x800")
         
-        # Initialize components
-        self.video_player = VideoPlayer()
-        self.ascii_converter = ASCIIConverter()
-        self.settings_manager = SettingsManager()
+        self.video = VideoLoader()
+        self.ascii = AsciiArtConverter()
+        self.settings = Settings()
         
-        # State variables
-        self.playback_state = PlaybackState.STOPPED
-        self.update_job: Optional[str] = None
-        self.frame_queue: queue.Queue = queue.Queue(maxsize=10)
-        self.processing_thread: Optional[threading.Thread] = None
-        self.render_fps = 0
-        self.last_render_time = 0
+        self.playing = False
+        self.current_frame = None
+        self.worker_run = True
+        self.frame_queue = queue.Queue(maxsize=3)
+        self.seeking = False
         
-        # Load saved settings
-        self.load_settings()
+        self._setup_ui()
+        self._load_settings()
+        self._start_worker()
         
-        # Setup UI
-        self.setup_ui()
+        root.protocol("WM_DELETE_WINDOW", self._quit)
         
-        # Start frame processor
-        self.start_frame_processor()
-        
-        # Bind keyboard shortcuts
-        self.setup_keyboard_shortcuts()
-        
-    def load_settings(self) -> None:
-        """Load settings from file"""
-        try:
-            self.ascii_converter.width = self.settings_manager.get("ascii_width", 100)
-            self.ascii_converter.chars = self.settings_manager.get("charset", " .:-=+*#%@")
-            self.ascii_converter.aspect_ratio = self.settings_manager.get("aspect_ratio", 0.55)
-        except Exception as e:
-            logger.error(f"Error loading settings: {e}")
+        log.info("loaded")
     
-    def setup_ui(self) -> None:
-        """Build the complete user interface"""
-        # Apply theme
-        theme = self.settings_manager.get("theme", "dark")
-        self.colors = self.THEMES.get(theme, self.THEMES["dark"])
-        self.root.configure(bg=self.colors["bg"])
+    def _setup_ui(self):
+
+        theme = self.THEMES[self.settings.get('theme', 'dark')]
+        self.root.configure(bg=theme['bg'])
         
-        # Main container
-        main_frame = tk.Frame(self.root, bg=self.colors["bg"])
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
         
-        # Control panel
-        self.create_control_panel(main_frame)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Open Video...", command=self.open_video, accelerator="Ctrl+O")
+        file_menu.add_command(label="Save ASCII", command=self.save_ascii, accelerator="Ctrl+S")
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._quit, accelerator="Ctrl+Q")
         
-        # Display area
-        self.create_display_area(main_frame)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Shortcuts", command=self.show_shortcuts)
+        help_menu.add_command(label="About", command=self.show_about)
         
-        # Progress bar
-        self.create_progress_bar(main_frame)
+        main = tk.Frame(self.root, bg=theme['bg'])
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Status bar
-        self.create_status_bar()
+        controls = tk.Frame(main, bg=theme['bg'])
+        controls.pack(fill=tk.X, pady=(0,10))
         
-    def create_control_panel(self, parent: tk.Frame) -> None:
-        """Create the control panel with all buttons and settings"""
-        control_frame = tk.Frame(parent, bg=self.colors["bg"])
-        control_frame.pack(fill=tk.X, pady=(0, 10))
+        left = tk.Frame(controls, bg=theme['bg'])
+        left.pack(side=tk.LEFT)
         
-        # File section
-        file_frame = tk.Frame(control_frame, bg=self.colors["bg"])
-        file_frame.pack(side=tk.LEFT, padx=5)
-        
-        self.file_label = tk.Label(
-            file_frame, text="No file selected",
-            bg=self.colors["bg"], fg="#888888", font=("Arial", 10)
-        )
+        self.file_label = tk.Label(left, text="No video", bg=theme['bg'], fg='#888')
         self.file_label.pack(side=tk.LEFT, padx=5)
         
-        self.btn_open = tk.Button(
-            file_frame, text="Open Video", command=self.open_video,
-            bg=self.colors["accent"], fg="white", relief=tk.FLAT, padx=10
-        )
-        self.btn_open.pack(side=tk.LEFT, padx=5)
+        self.open_btn = tk.Button(left, text="Open", command=self.open_video, 
+                                   bg=theme['accent'], fg='white', relief=tk.FLAT, padx=10)
+        self.open_btn.pack(side=tk.LEFT, padx=5)
         
-        # Recent files dropdown
         self.recent_var = tk.StringVar()
-        self.recent_menu = tk.OptionMenu(
-            file_frame, self.recent_var, "", *self.settings_manager.get("recent_files", [])
-        )
-        self.recent_menu.config(bg=self.colors["button_bg"], fg=self.colors["fg"], relief=tk.FLAT)
-        self.recent_var.trace('w', lambda *args: self.load_recent_file())
+        self.recent_menu = tk.OptionMenu(left, self.recent_var, "")
+        self.recent_menu.config(bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT)
+        self.recent_var.trace('w', lambda *_: self._load_recent())
         self.recent_menu.pack(side=tk.LEFT, padx=5)
         
-        # Playback section
-        playback_frame = tk.Frame(control_frame, bg=self.colors["bg"])
-        playback_frame.pack(side=tk.LEFT, padx=20)
+        play_frame = tk.Frame(controls, bg=theme['bg'])
+        play_frame.pack(side=tk.LEFT, padx=20)
         
-        self.btn_play = tk.Button(
-            playback_frame, text="Play", command=self.toggle_playback,
-            bg=self.colors["button_bg"], fg=self.colors["fg"],
-            relief=tk.FLAT, padx=10, state=tk.DISABLED
-        )
-        self.btn_play.pack(side=tk.LEFT, padx=2)
+        self.play_btn = tk.Button(play_frame, text="Play", command=self.toggle_play,
+                                   bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT, padx=10)
+        self.play_btn.pack(side=tk.LEFT, padx=2)
         
-        self.btn_stop = tk.Button(
-            playback_frame, text="Stop", command=self.stop_playback,
-            bg=self.colors["button_bg"], fg=self.colors["fg"],
-            relief=tk.FLAT, padx=10, state=tk.DISABLED
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=2)
+        self.stop_btn = tk.Button(play_frame, text="Stop", command=self.stop,
+                                   bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT, padx=10)
+        self.stop_btn.pack(side=tk.LEFT, padx=2)
         
-        # Settings section
-        settings_frame = tk.Frame(control_frame, bg=self.colors["bg"])
-        settings_frame.pack(side=tk.RIGHT, padx=5)
+        self.loop_var = tk.BooleanVar(value=self.settings.get('loop', False))
+        self.loop_cb = tk.Checkbutton(play_frame, text="Loop", variable=self.loop_var,
+                                       command=lambda: self.settings.set('loop', self.loop_var.get()),
+                                       bg=theme['bg'], fg=theme['fg'], selectcolor=theme['bg'])
+        self.loop_cb.pack(side=tk.LEFT, padx=10)
         
-        # Width control
-        tk.Label(settings_frame, text="Width:", bg=self.colors["bg"], fg=self.colors["fg"]).pack(side=tk.LEFT, padx=2)
-        self.width_var = tk.StringVar(value=str(self.ascii_converter.width))
-        width_spin = tk.Spinbox(
-            settings_frame, from_=10, to=300, textvariable=self.width_var, width=5,
-            bg=self.colors["button_bg"], fg=self.colors["fg"], relief=tk.FLAT
-        )
-        width_spin.pack(side=tk.LEFT, padx=2)
+        right = tk.Frame(controls, bg=theme['bg'])
+        right.pack(side=tk.RIGHT)
         
-        # Font size control
-        tk.Label(settings_frame, text="Font:", bg=self.colors["bg"], fg=self.colors["fg"]).pack(side=tk.LEFT, padx=2)
-        self.font_var = tk.StringVar(value=str(self.settings_manager.get("font_size", 10)))
-        font_spin = tk.Spinbox(
-            settings_frame, from_=6, to=30, textvariable=self.font_var, width=5,
-            bg=self.colors["button_bg"], fg=self.colors["fg"], relief=tk.FLAT
-        )
-        font_spin.pack(side=tk.LEFT, padx=2)
+        tk.Label(right, text="W:", bg=theme['bg'], fg=theme['fg']).pack(side=tk.LEFT)
+        self.width_var = tk.StringVar(value="100")
+        tk.Spinbox(right, from_=10, to=300, textvariable=self.width_var, width=5,
+                   bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT).pack(side=tk.LEFT, padx=2)
         
-        # Theme selector
-        tk.Label(settings_frame, text="Theme:", bg=self.colors["bg"], fg=self.colors["fg"]).pack(side=tk.LEFT, padx=2)
-        self.theme_var = tk.StringVar(value=self.settings_manager.get("theme", "dark"))
-        theme_combo = ttk.Combobox(
-            settings_frame, textvariable=self.theme_var, values=list(self.THEMES.keys()),
-            width=8, state="readonly"
-        )
-        theme_combo.pack(side=tk.LEFT, padx=2)
-        theme_combo.bind('<<ComboboxSelected>>', self.change_theme)
+        tk.Label(right, text="Chars:", bg=theme['bg'], fg=theme['fg']).pack(side=tk.LEFT)
+        self.charset_entry = tk.Entry(right, width=12, bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT)
+        self.charset_entry.pack(side=tk.LEFT, padx=2)
         
-        self.btn_apply = tk.Button(
-            settings_frame, text="Apply", command=self.apply_settings,
-            bg=self.colors["button_bg"], fg=self.colors["fg"], relief=tk.FLAT, padx=10
-        )
-        self.btn_apply.pack(side=tk.LEFT, padx=5)
+        tk.Label(right, text="Theme:", bg=theme['bg'], fg=theme['fg']).pack(side=tk.LEFT)
+        self.theme_combo = ttk.Combobox(right, values=list(self.THEMES.keys()), width=8, state='readonly')
+        self.theme_combo.pack(side=tk.LEFT, padx=2)
+        self.theme_combo.bind('<<ComboboxSelected>>', self._change_theme)
         
-    def create_display_area(self, parent: tk.Frame) -> None:
-        """Create the ASCII art display area with scrollbars"""
-        display_frame = tk.Frame(parent, bg="#000000")
-        display_frame.pack(fill=tk.BOTH, expand=True)
+        tk.Button(right, text="Apply", command=self._apply,
+                 bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT, padx=8).pack(side=tk.LEFT, padx=5)
         
-        self.canvas = tk.Canvas(display_frame, bg="#000000", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        disp_frame = tk.Frame(main, bg='#000000')
+        disp_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Scrollbars
-        v_scrollbar = tk.Scrollbar(display_frame, orient=tk.VERTICAL, command=self.canvas.yview)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text = tk.Text(disp_frame, bg='#000000', fg=theme['fg'],
+                           font=("Courier", 10), wrap=tk.NONE, relief=tk.FLAT)
+        self.text.pack(fill=tk.BOTH, expand=True)
         
-        h_scrollbar = tk.Scrollbar(display_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        v_scroll = tk.Scrollbar(disp_frame, orient=tk.VERTICAL, command=self.text.yview)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll = tk.Scrollbar(disp_frame, orient=tk.HORIZONTAL, command=self.text.xview)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.text.config(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
         
-        self.canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        prog_frame = tk.Frame(main, bg=theme['bg'])
+        prog_frame.pack(fill=tk.X, pady=10)
         
-        # ASCII frame
-        self.ascii_frame = tk.Frame(self.canvas, bg="#000000")
-        self.canvas.create_window((0, 0), window=self.ascii_frame, anchor=tk.NW)
+        self.time_label = tk.Label(prog_frame, text="00:00:00", bg=theme['bg'], fg=theme['fg'])
+        self.time_label.pack(side=tk.LEFT, padx=5)
         
-        # ASCII label
-        font_size = self.settings_manager.get("font_size", 10)
-        self.ascii_label = tk.Label(
-            self.ascii_frame, text="", bg="#000000",
-            fg=self.colors["fg"], font=("Courier", font_size), justify=tk.LEFT
-        )
-        self.ascii_label.pack()
+        self.slider = tk.Scale(prog_frame, from_=0, to=100, orient=tk.HORIZONTAL,
+                               bg=theme['bg'], highlightthickness=0)
+        self.slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.slider.bind('<ButtonPress-1>', lambda e: setattr(self, 'seeking', True))
+        self.slider.bind('<ButtonRelease-1>', lambda e: self._do_seek())
         
-    def create_progress_bar(self, parent: tk.Frame) -> None:
-        """Create seek slider and time display"""
-        progress_frame = tk.Frame(parent, bg=self.colors["bg"])
-        progress_frame.pack(fill=tk.X, pady=10)
+        self.total_label = tk.Label(prog_frame, text="00:00:00", bg=theme['bg'], fg=theme['fg'])
+        self.total_label.pack(side=tk.RIGHT, padx=5)
         
-        # Time labels
-        self.time_current = tk.Label(progress_frame, text="00:00:00", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.time_current.pack(side=tk.LEFT, padx=5)
-        
-        # Seek slider
-        self.seek_var = tk.DoubleVar()
-        self.seek_slider = tk.Scale(
-            progress_frame, from_=0, to=100, orient=tk.HORIZONTAL,
-            variable=self.seek_var, command=self.on_seek, bg=self.colors["bg"],
-            highlightthickness=0, length=400
-        )
-        self.seek_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
-        
-        # Total time
-        self.time_total = tk.Label(progress_frame, text="00:00:00", bg=self.colors["bg"], fg=self.colors["fg"])
-        self.time_total.pack(side=tk.RIGHT, padx=5)
-        
-        # FPS counter
-        self.fps_label = tk.Label(progress_frame, text="0 fps", bg=self.colors["bg"], fg="#888888")
+        self.fps_label = tk.Label(prog_frame, text="0 fps", bg=theme['bg'], fg='#888')
         self.fps_label.pack(side=tk.RIGHT, padx=10)
         
-    def create_status_bar(self) -> None:
-        """Create status bar for messages"""
-        self.status_bar = tk.Label(
-            self.root, text="Ready", bg=self.colors["status_bg"],
-            fg="white", anchor=tk.W, padx=10
-        )
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status = tk.Label(self.root, text="Ready | Press F1 for help",
+                               bg=theme['accent'], fg='white', anchor=tk.W, padx=10)
+        self.status.pack(side=tk.BOTTOM, fill=tk.X)
         
-    def setup_keyboard_shortcuts(self) -> None:
-        """Setup keyboard shortcuts"""
-        self.root.bind('<space>', lambda e: self.toggle_playback())
-        self.root.bind('<Escape>', lambda e: self.stop_playback())
-        self.root.bind('<Left>', lambda e: self.frame_step(-1))
-        self.root.bind('<Right>', lambda e: self.frame_step(1))
+        # elseifelseifesleif
+        self.root.bind('<space>', lambda e: self.toggle_play())
+        self.root.bind('<Escape>', lambda e: self.stop())
+        self.root.bind('<Left>', lambda e: self._step(-1))
+        self.root.bind('<Right>', lambda e: self._step(1))
         self.root.bind('<Control-o>', lambda e: self.open_video())
-        self.root.bind('<Control-q>', lambda e: self.on_closing())
+        self.root.bind('<Control-s>', lambda e: self.save_ascii())
+        self.root.bind('<Control-q>', lambda e: self._quit())
+        self.root.bind('<F1>', lambda e: self.show_shortcuts())
+        self.root.bind('<Home>', lambda e: self._seek_to_start())
+        self.root.bind('<End>', lambda e: self._seek_to_end())
+        self.root.bind('<Control-plus>', lambda e: self._adjust_font(1))
+        self.root.bind('<Control-minus>', lambda e: self._adjust_font(-1))
         
-    def open_video(self) -> None:
-        """Open video file dialog"""
-        file_path = filedialog.askopenfilename(
-            title="Select Video File",
-            filetypes=[
-                ("Video files", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.webm"),
-                ("All files", "*.*")
-            ]
+        self.play_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.DISABLED)
+        
+        self._update_recent_menu()
+    
+    def _load_settings(self):
+        self.ascii.width = self.settings.get('width', 100)
+        self.ascii.chars = self.settings.get('charset', AsciiArtConverter.CHARS)
+        self.ascii.aspect = self.settings.get('aspect', 0.55)
+        
+        self.width_var.set(str(self.ascii.width))
+        self.charset_entry.insert(0, self.ascii.chars)
+        self.theme_combo.set(self.settings.get('theme', 'dark'))
+        
+        font_size = self.settings.get('font_size', 10)
+        self.text.config(font=("Courier", font_size))
+    
+    def _update_recent_menu(self):
+
+        recent = self.settings.get('recent', [])
+        menu = self.recent_menu['menu']
+        menu.delete(0, 'end')
+        
+        if recent:
+            for path in recent:
+                name = Path(path).name
+                if len(name) > 40:
+                    name = name[:37] + "..."
+                menu.add_command(label=name, command=lambda p=path: self._load_video(p))
+            self.recent_menu.config(state=tk.NORMAL)
+        else:
+            menu.add_command(label="No recent files", command=lambda: None)
+            self.recent_menu.config(state=tk.DISABLED)
+    
+    def _load_recent(self):
+        path = self.recent_var.get()
+        if path and Path(path).exists():
+            self._load_video(path)
+    
+    def open_video(self):
+        path = filedialog.askopenfilename(
+            title="Select Video",
+            filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.flv *.webm"), ("All", "*.*")]
         )
-        
-        if file_path:
-            self.load_video(file_path)
-            
-    def load_recent_file(self) -> None:
-        """Load recently selected file"""
-        file_path = self.recent_var.get()
-        if file_path and os.path.exists(file_path):
-            self.load_video(file_path)
-        elif file_path:
-            messagebox.showwarning("File Not Found", f"File no longer exists:\n{file_path}")
-            self.settings_manager.add_recent_file(file_path)  # This will remove it
-            self.update_recent_menu()
-            
-    def load_video(self, file_path: str) -> None:
-        """Load and prepare video file"""
+        if path:
+            self._load_video(path)
+    
+    def _load_video(self, path): # why do we need second one to actually load
         try:
-            self.status_bar.config(text=f"Loading: {os.path.basename(file_path)}...")
+            self.stop()
+            
+            self.status.config(text=f"Loading {Path(path).name}...")
             self.root.update()
             
-            # Load video
-            if self.video_player.load_video(file_path):
-                self.file_label.config(text=os.path.basename(file_path))
-                self.btn_play.config(state=tk.NORMAL)
-                self.btn_stop.config(state=tk.NORMAL)
-                
-                # Update UI with metadata
-                if self.video_player.metadata:
-                    duration = self.video_player.metadata.duration
-                    self.time_total.config(text=str(timedelta(seconds=int(duration))))
-                    self.seek_slider.config(state=tk.NORMAL)
-                
-                # Add to recent files
-                self.settings_manager.add_recent_file(file_path)
-                self.update_recent_menu()
-                
-                self.status_bar.config(text=f"Loaded: {os.path.basename(file_path)}")
-                logger.info(f"Video loaded: {file_path}")
-                
-                # Show first frame
-                self.update_frame_display()
-            else:
-                raise ValueError("Failed to load video")
-                
+            info = self.video.load(path)
+            
+            self.file_label.config(text=Path(path).name)
+            self.play_btn.config(state=tk.NORMAL, text="Play")
+            self.stop_btn.config(state=tk.NORMAL)
+            self.total_label.config(text=self._format_time(info['duration']))
+            
+            self.settings.add_recent(str(path))
+            self._update_recent_menu()
+
+            #show first image thing
+            self.video.seek(0)
+            frame = self.video.get_frame(0)
+            if frame:
+                self._show_frame(frame)
+            
+            self.status.config(text=f"Loaded: {Path(path).name} | {info['size']} | {info['fps']:.1f}fps")
+            
         except Exception as e:
-            error_msg = f"Failed to load video: {str(e)}"
-            logger.error(error_msg)
-            messagebox.showerror("Error", error_msg)
-            self.status_bar.config(text="Error loading video")
+            log.error(f"Load failed: {e}")
+            messagebox.showerror("Error", f"Can't load video:\n{e}")
+            self.status.config(text="Load failed")
+    
+    def toggle_play(self):
+        if not self.video.cap:
+            return
             
-    def update_recent_menu(self) -> None:
-        """Update recent files dropdown menu"""
-        recent_files = self.settings_manager.get("recent_files", [])
-        if recent_files:
-            menu = self.recent_menu["menu"]
-            menu.delete(0, "end")
-            for file in recent_files:
-                menu.add_command(label=os.path.basename(file), command=lambda f=file: self.load_video(f))
-            self.recent_menu.config(state="normal")
+        if self.playing:
+            self.playing = False
+            self.play_btn.config(text="Play")
+            self.status.config(text="Paused")
         else:
-            self.recent_menu.config(state="disabled")
-            
-    def toggle_playback(self) -> None:
-        """Toggle play/pause state"""
-        if not self.video_player.is_loaded():
+            self.playing = True
+            self.play_btn.config(text="Pause")
+            self.status.config(text="Playing")
+            self._schedule_display()
+    
+    def stop(self):
+        """Stop and reset to beginning"""
+        self.playing = False
+        self.play_btn.config(text="Play")
+        self.status.config(text="Stopped")
+        
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except:
+                break #very retarted
+        
+        if self.video.cap:
+            self.video.seek(0)
+            frame = self.video.get_frame(0)
+            if frame:
+                self._show_frame(frame)
+    
+    def _step(self, delta):
+        if not self.video.cap:
             return
             
-        if self.playback_state == PlaybackState.PLAYING:
-            self.playback_state = PlaybackState.PAUSED
-            self.btn_play.config(text="Play")
-            self.status_bar.config(text="Paused")
-        else:
-            self.playback_state = PlaybackState.PLAYING
-            self.btn_play.config(text="Pause")
-            self.status_bar.config(text="Playing")
-            self.start_playback()
-            
-    def start_playback(self) -> None:
-        """Start the playback loop"""
-        if self.playback_state == PlaybackState.PLAYING:
-            self.update_frame_display()
-            
-    def stop_playback(self) -> None:
-        """Stop playback and reset to beginning"""
-        self.playback_state = PlaybackState.STOPPED
-        self.btn_play.config(text="Play")
-        self.btn_stop.config(state=tk.DISABLED)
-        
-        if self.video_player.is_loaded():
-            self.video_player.set_frame_position(0)
-            self.update_frame_display()
-            
-        self.status_bar.config(text="Stopped")
-        
-    def frame_step(self, delta: int) -> None:
-        """Step forward or backward by frames"""
-        if not self.video_player.is_loaded():
-            return
-            
-        # Pause playback
-        was_playing = self.playback_state == PlaybackState.PLAYING
+        was_playing = self.playing
         if was_playing:
-            self.playback_state = PlaybackState.PAUSED
-            
-        # Move frame
-        current = self.video_player.get_current_frame_num()
-        new_frame = current + delta
-        new_frame = max(0, min(new_frame, self.video_player.metadata.total_frames - 1))
+            self.playing = False
         
-        if self.video_player.get_frame(new_frame) is not None:
-            self.update_frame_display()
-            
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except:
+                break
+        
+        current = self.video.get_frame()
+        if current:
+            new_num = max(0, min(current['num'] + delta, self.video.total_frames - 1))
+            frame = self.video.get_frame(new_num)
+            if frame:
+                self._show_frame(frame)
+        
         if was_playing:
-            self.playback_state = PlaybackState.PLAYING
-            
-    def on_seek(self, value: str) -> None:
-        """Handle seek slider movement"""
-        if not self.video_player.is_loaded():
+            self.playing = True
+            self._schedule_display()
+    
+    def _seek_to_start(self):
+        if self.video.cap:
+            was_playing = self.playing
+            if was_playing:
+                self.playing = False
+            self.video.seek(0)
+            frame = self.video.get_frame(0)
+            if frame:
+                self._show_frame(frame)
+            if was_playing:
+                self.playing = True
+                self._schedule_display()
+    
+    def _seek_to_end(self):
+        if self.video.cap:
+            was_playing = self.playing
+            if was_playing:
+                self.playing = False
+            self.video.seek(0.99)
+            frame = self.video.get_frame()
+            if frame:
+                self._show_frame(frame)
+            if was_playing:
+                self.playing = True
+                self._schedule_display()
+    
+    def _do_seek(self): # we have this seaking mechanism but also we have _step
+        if not self.video.cap: # need to do something abt this issue
+            self.seeking = False
             return
             
-        position = float(value) / 100.0
-        if self.video_player.set_frame_position(position):
-            self.update_frame_display()
+        pos = self.slider.get() / 100.0
+        was_playing = self.playing
+        
+        if was_playing:
+            self.playing = False
+        
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except:
+                break
+        
+        self.video.seek(pos)
+        frame = self.video.get_frame()
+        if frame:
+            self._show_frame(frame)
+        
+        if was_playing:
+            self.playing = True
+            self._schedule_display()
+        
+        self.seeking = False
+    
+    def _show_frame(self, frame_data):
+        ascii_text = self.ascii.convert(frame_data['frame'])
+        self.current_frame = frame_data
+        
+        self.text.delete(1.0, tk.END)
+        self.text.insert(1.0, ascii_text)
+        
+        if not self.seeking:
+            progress = frame_data['num'] / max(1, self.video.total_frames) * 100
+            self.slider.set(progress)
+            self.time_label.config(text=self._format_time(frame_data['time']))
+    
+    def _format_time(self, seconds):
+        """Convert seconds to HH:MM:SS"""
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    
+    def _start_worker(self):
+        """Background thread for reading video frames"""
+        def worker():
+            last_frame_time = 0
             
-            # Update time display
-            if self.video_player.metadata:
-                current_time = position * self.video_player.metadata.duration
-                self.time_current.config(text=str(timedelta(seconds=int(current_time))))
-                
-    def update_frame_display(self) -> None:
-        """Update the displayed frame (called from main thread)"""
-        if not self.video_player.is_loaded():
-            return
-            
-        # Get frame from queue or directly
-        try:
-            # Try to get frame from queue (from processing thread)
-            frame = self.frame_queue.get_nowait() if not self.frame_queue.empty() else None
-            if frame is None:
-                frame = self.video_player.get_frame()
-        except:
-            frame = self.video_player.get_frame()
-            
-        if frame is not None:
-            # Calculate and display FPS
-            current_time = time.time()
-            if self.last_render_time > 0:
-                elapsed = current_time - self.last_render_time
-                if elapsed > 0:
-                    self.render_fps = 1.0 / elapsed
-                    self.fps_label.config(text=f"{self.render_fps:.1f} fps")
-            self.last_render_time = current_time
-            
-            # Convert to ASCII
-            ascii_art = self.ascii_converter.frame_to_ascii(frame)
-            self.ascii_label.config(text=ascii_art)
-            
-            # Update scroll region
-            self.ascii_frame.update_idletasks()
-            self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
-            
-            # Update progress
-            if self.video_player.metadata:
-                current_frame = self.video_player.get_current_frame_num()
-                position = current_frame / self.video_player.metadata.total_frames
-                self.seek_var.set(position * 100)
-                
-                current_time = position * self.video_player.metadata.duration
-                self.time_current.config(text=str(timedelta(seconds=int(current_time))))
-                
-        # Schedule next update
-        if self.playback_state == PlaybackState.PLAYING and self.video_player.metadata:
-            # Calculate delay based on video FPS (capped)
-            fps = min(self.video_player.metadata.fps, VideoPlayer.MAX_FPS_CAP)
-            delay = max(33, int(1000 / fps))  # Minimum 33ms for 30fps
-            self.update_job = self.root.after(delay, self.update_frame_display)
-            
-    def start_frame_processor(self) -> None:
-        """Start background thread for frame processing"""
-        def process_frames():
-            while True:
-                if self.playback_state == PlaybackState.PLAYING and self.video_player.is_loaded():
-                    frame = self.video_player.get_frame()
-                    if frame is not None and self.frame_queue.qsize() < 5:
-                        # Clear old frames if queue is filling up
-                        while self.frame_queue.qsize() > 2:
+            while self.worker_run:
+                if self.playing and self.video.cap:
+                    fps = self.video.fps
+                    min_interval = 1.0 / fps if fps > 0 else 0.04
+                    
+                    now = time.time()
+                    if now - last_frame_time >= min_interval:
+                        frame = self.video.get_frame()
+                        if frame:
                             try:
-                                self.frame_queue.get_nowait()
-                            except queue.Empty:
-                                break
-                        self.frame_queue.put(frame)
-                time.sleep(0.033)  # ~30fps processing
+                                self.frame_queue.put_nowait(frame)
+                            except queue.Full:
+                                try:
+                                    self.frame_queue.get_nowait()
+                                    self.frame_queue.put_nowait(frame)
+                                except:
+                                    pass
+                            last_frame_time = now
+                        else:
+                            if self.loop_var.get():
+                                self.video.seek(0)
+                            else:
+                                self.root.after(0, lambda: self.stop())
+                                self.playing = False
+                    else:
+                        time.sleep(0.005)
+                else:
+                    time.sleep(0.02)
+        
+        self.worker_thread = threading.Thread(target=worker, daemon=True)
+        self.worker_thread.start()
+    
+    def _schedule_display(self):
+        """Schedule next frame display"""
+        if self.playing and self.video.cap:
+            try:
+                frame = self.frame_queue.get_nowait()
+                self._show_frame(frame)
                 
-        self.processing_thread = threading.Thread(target=process_frames, daemon=True)
-        self.processing_thread.start()
-        
-    def apply_settings(self) -> None:
-        """Apply user settings"""
+                if hasattr(self, '_frame_count'):
+                    self._frame_count += 1
+                    if self._frame_count % 30 == 0:
+                        fps = self.video.fps
+                        self.fps_label.config(text=f"{fps:.1f} fps")
+                else:
+                    self._frame_count = 0
+                    
+            except queue.Empty:
+                pass
+            
+            # shedule next frame update
+            delay = int(1000 / max(self.video.fps, 1.0))
+            self.root.after(delay, self._schedule_display)
+    
+    def _apply(self):
+
         try:
-            # Validate width
             width = int(self.width_var.get())
-            if width <= 0:
-                raise ValueError("Width must be positive")
-            width = max(10, min(width, 300))
+            charset = self.charset_entry.get().strip()
+            theme = self.theme_combo.get()
+            font_size = int(self.text.cget('font').split()[-1])  # what font size
             
-            # Validate font size
-            font_size = int(self.font_var.get())
-            if font_size <= 0:
-                raise ValueError("Font size must be positive")
-            font_size = max(6, min(font_size, 30))
+            if width < 10 or width > 300:
+                raise ValueError("Width must be 10-300")
+            if len(charset) < 2:
+                raise ValueError("Charset needs at least 2 chars")
+            if theme not in self.THEMES:
+                raise ValueError("Bad theme")
+            self.ascii.width = width
+            self.ascii.chars = charset
             
-            # Apply settings
-            self.ascii_converter.set_width(width)
-            self.ascii_label.config(font=("Courier", font_size))
+            self.settings.set('width', width)
+            self.settings.set('charset', charset)
+            self.settings.set('theme', theme)
             
-            # Save settings
-            self.settings_manager.set("ascii_width", width)
-            self.settings_manager.set("font_size", font_size)
+            if self.current_frame:
+                self._show_frame(self.current_frame)
             
-            # Refresh display
-            self.update_frame_display()
+            self.status.config(text="Settings applied")
             
-            self.status_bar.config(text="Settings applied")
-            logger.info(f"Settings applied: width={width}, font_size={font_size}")
-            
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid settings: {str(e)}")
-            
-    def change_theme(self, event=None) -> None:
-        """Change UI theme"""
-        theme = self.theme_var.get()
-        if theme in self.THEMES:
-            self.settings_manager.set("theme", theme)
-            self.colors = self.THEMES[theme]
-            # Update colors (simplified - full theme change would need rebuild)
-            self.status_bar.config(bg=self.colors["status_bg"])
-            self.fps_label.config(fg="#888888")
-            self.ascii_label.config(fg=self.colors["fg"])
-            self.status_bar.config(text=f"Theme changed to {theme}")
-            
-    def on_closing(self) -> None:
-        """Clean up resources on window close"""
-        logger.info("Shutting down...")
+        except Exception as e:
+            messagebox.showerror("Bad setting", str(e))
+    
+    def _change_theme(self, e=None):
+        theme_name = self.theme_combo.get()
+        colors = self.THEMES.get(theme_name, self.THEMES['dark'])
         
-        # Cancel scheduled updates
-        if self.update_job:
-            self.root.after_cancel(self.update_job)
+        self.root.configure(bg=colors['bg'])
+        self.status.config(bg=colors['accent'])
+        self.open_btn.config(bg=colors['accent'])
+        self.play_btn.config(bg=colors['btn'], fg=colors['fg'])
+        self.stop_btn.config(bg=colors['btn'], fg=colors['fg'])
+        self.text.config(fg=colors['fg'])
+        
+        self.settings.set('theme', theme_name)
+        self.status.config(text=f"Theme: {theme_name}")
+    
+    def _adjust_font(self, delta):
+        current = int(self.text.cget('font').split()[-1])
+        new = max(6, min(30, current + delta))
+        self.text.config(font=("Courier", new))
+        self.settings.set('font_size', new)
+    
+    def save_ascii(self):
+        content = self.text.get(1.0, tk.END).strip()
+        if not content:
+            messagebox.showwarning("Nothing to save", "No ASCII art displayed")
+            return
             
-        # Release video resources
-        self.video_player.release()
-        
-        # Save settings
-        self.settings_manager.save()
-        
-        # Destroy window
+        path = filedialog.asksaveasfilename(defaultextension=".txt",
+                                            filetypes=[("Text files", "*.txt")])
+        if path:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                self.status.config(text=f"Saved to {Path(path).name}")
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e))
+    
+    def show_shortcuts(self):
+        shortcuts = """
+Space           - Play/Pause
+Escape          - Stop & rewind
+← / →           - Previous/next frame
+Home / End      - Jump to start/end
+Ctrl+O          - Open video
+Ctrl+S          - Save ASCII
+Ctrl+Q          - Quit
+Ctrl+Plus/Minus - Zoom text
+F1              - This help"""
+        messagebox.showinfo("Shortcuts", shortcuts)
+    
+    def show_about(self):
+        about = """ASCII Video Player
+made by 74fm"""
+        messagebox.showinfo("About", about) 
+    
+    def _quit(self):
+        """Clean shutdown"""
+        log.info("Shutting down...")
+        self.worker_run = False
+        self.playing = False
+        if hasattr(self, 'worker_thread'):
+            self.worker_thread.join(timeout=1)
+        self.video.close()
+        self.settings.save()
         self.root.quit()
         self.root.destroy()
 
 
 def main():
-    """Main entry point"""
-    try:
-        root = tk.Tk()
-        app = ASCIIVideoGUI(root)
-        root.mainloop()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        messagebox.showerror("Fatal Error", f"Application failed to start:\n{str(e)}")
+    root = tk.Tk()
+    app = ASCIIVideoGUI(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    main() # note some ai was used but i needed for help ty
