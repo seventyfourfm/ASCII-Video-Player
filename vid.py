@@ -15,7 +15,7 @@ import logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
-    handlers=[logging.FileHandler("log.log"), logging.StreamHandler()] # file 1
+    handlers=[logging.FileHandler("log.log"), logging.StreamHandler()] # log1
 )
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class AsciiArtConverter:
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             h, w = gray.shape
-            new_h = int(h * self.width / w * self.aspect)
+            new_h = int(h * self.width / w * self.aspect) # not magic number its ratio for monospace fonts
             
             if new_h > 500:
                 new_h = 500
@@ -73,9 +73,9 @@ class VideoLoader:
             raise ValueError(f"Can't open video: {path}")
         
 
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0 or self.fps > 120:
-            self.fps = 24.0
+        self.fps = cap.get(cv2.CAP_PROP_FPS) # probably need to use this  https://docs.opencv.org/4.x/dd/d43/classcv_1_1VideoCapture.html
+        if self.fps <= 0 or self.fps > 120: #make so default fps if video has invalid value
+            self.fps = 24.0 #maybe warn usr?
             
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if self.total_frames <= 0:
@@ -122,7 +122,7 @@ class VideoLoader:
             
         return None
     
-    def seek(self, pos_01):
+    def seek(self, pos_01): # dont work properly with CV_PROP_POS_AVI_RATIO 
         if not self.cap:
             return False
             
@@ -142,7 +142,7 @@ class VideoLoader:
 class Settings:
     
     def __init__(self):
-        self.file = Path.home() / ".config.json" # second one
+        self.file = Path.home() / ".config.json" #second one
         self.data = {
             'width': 100,
             'font_size': 10,
@@ -205,9 +205,9 @@ class ASCIIVideoGUI:
         self.settings = Settings()
         
         self.playing = False
-        self.current_frame = None
+        self.current_frame = Nonedelay = int(1000 / max(self.video.fps, 1.0)) # i think i did that number because i converted fps to miliseconds
         self.worker_run = True
-        self.frame_queue = queue.Queue(maxsize=3)
+        self.frame_queue = queue.Queue(maxsize=3) #balance between smooth playback and memory usage
         self.seeking = False
         
         self._setup_ui()
@@ -338,7 +338,7 @@ class ASCIIVideoGUI:
         self.root.bind('<Left>', lambda e: self._step(-1))
         self.root.bind('<Right>', lambda e: self._step(1))
         self.root.bind('<Control-o>', lambda e: self.open_video())
-        self.root.bind('<Control-s>', lambda e: self.save_ascii()) # third? why
+        self.root.bind('<Control-s>', lambda e: self.save_ascii()) # third doweneed it?
         self.root.bind('<Control-q>', lambda e: self._quit())
         self.root.bind('<F1>', lambda e: self.show_shortcuts())
         self.root.bind('<Home>', lambda e: self._seek_to_start())
@@ -443,7 +443,7 @@ class ASCIIVideoGUI:
         self.play_btn.config(text="Play")
         self.status.config(text="Stopped")
         
-        while not self.frame_queue.empty():
+        while not self.frame_queue.empty(): # inaficient breaks sometimes
             try:
                 self.frame_queue.get_nowait()
             except:
@@ -507,7 +507,7 @@ class ASCIIVideoGUI:
                 self._schedule_display()
     
     def _do_seek(self): # we have this seaking mechanism but also we have _step
-        if not self.video.cap: # need to do something abt this issue
+        if not self.video.cap: # need to do something abt this issue (maybe merge?)
             self.seeking = False
             return
             
@@ -692,7 +692,7 @@ F1              - This help"""
     
     def show_about(self):
         about = """ASCII Video Player
-made by 74fm"""
+made by 74fm""" #need to add soemthing more here its bare
         messagebox.showinfo("About", about) 
     
     def _quit(self):
