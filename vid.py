@@ -205,11 +205,12 @@ class ASCIIVideoGUI:
         self.settings = Settings()
         
         self.playing = False
-        self.current_frame = Nonedelay = int(1000 / max(self.video.fps, 1.0)) # i think i did that number because i converted fps to miliseconds
+        
         self.worker_run = True
         self.frame_queue = queue.Queue(maxsize=3) #balance between smooth playback and memory usage
         self.seeking = False
-        
+        self.current_frame = None
+        self.delay = int(1000 / max(self.video.fps, 1.0))
         self._setup_ui()
         self._load_settings()
         self._start_worker()
@@ -257,7 +258,7 @@ class ASCIIVideoGUI:
         self.recent_var = tk.StringVar()
         self.recent_menu = tk.OptionMenu(left, self.recent_var, "")
         self.recent_menu.config(bg=theme['btn'], fg=theme['fg'], relief=tk.FLAT)
-        self.recent_var.trace('w', lambda *_: self._load_recent())
+        self.recent_var.trace_add('write', lambda *_: self._load_recent())
         self.recent_menu.pack(side=tk.LEFT, padx=5)
         
         play_frame = tk.Frame(controls, bg=theme['bg'])
@@ -580,7 +581,7 @@ class ASCIIVideoGUI:
                             if self.loop_var.get():
                                 self.video.seek(0)
                             else:
-                                self.root.after(0, lambda: self.stop())
+                                self.root.after(0, self.stop)
                                 self.playing = False
                     else:
                         time.sleep(0.005)
